@@ -54,10 +54,10 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 # ==========================================
 # 4. IN-MEMORY CACHE STORAGE
 # ==========================================
-vc_join_times = {}      # {user_id: timestamp when they joined VC}
-vc_total_times = {}     # {user_id: all-time total seconds}
-vc_today_times = {}     # {user_id: seconds spent today}
-vc_today_date = {}      # {user_id: "YYYY-MM-DD" to detect day change}
+vc_join_times = {}      # {(guild_id, user_id): timestamp}
+vc_total_times = {}     # {user_id: all-time total seconds (global across all servers)}
+vc_today_times = {}     # {(guild_id, user_id): seconds today in this server}
+vc_today_date = {}      # {(guild_id, user_id): "YYYY-MM-DD"}
 last_game = {}          # {user_id: {"name": str, "time": timestamp, "ended": timestamp}}
 
 def get_today():
@@ -78,16 +78,16 @@ def format_duration(seconds):
     else:
         return f"{secs}s"
 
-def add_vc_time(user_id, elapsed):
-    """Add elapsed seconds to both total and today's counter, resetting today if it's a new day."""
+def add_vc_time(guild_id, user_id, elapsed):
     today = get_today()
+    key = (guild_id, user_id)
 
-    # Reset today's counter if it's a new day
-    if vc_today_date.get(user_id) != today:
-        vc_today_times[user_id] = 0
-        vc_today_date[user_id] = today
+    # Reset today's counter if it's a new day for this server
+    if vc_today_date.get(key) != today:
+        vc_today_times[key] = 0
+        vc_today_date[key] = today
 
-    vc_today_times[user_id] = vc_today_times.get(user_id, 0) + elapsed
+    vc_today_times[key] = vc_today_times.get(key, 0) + elapsed
     vc_total_times[user_id] = vc_total_times.get(user_id, 0) + elapsed
 
 # ==========================================
@@ -96,10 +96,10 @@ def add_vc_time(user_id, elapsed):
 @tasks.loop(minutes=1)
 async def daily_reset_check():
     today = get_today()
-    for uid in list(vc_today_date.keys()):
-        if vc_today_date[uid] != today:
-            vc_today_times[uid] = 0
-            vc_today_date[uid] = today
+    for key in list(vc_today_date.keys()):
+        if vc_today_date[key] != today:
+            vc_today_times[key] = 0
+            vc_today_date[key] = today
 
 # ==========================================
 # 6. ROTATING STATUS LOOP
@@ -126,7 +126,7 @@ async def on_ready():
         for vc in guild.voice_channels:
             for member in vc.members:
                 if not member.bot:
-                    vc_join_times[member.id] = time.time()
+                    vc_join_times[(guild.id, member.id)] = time.time()
 
 # ==========================================
 # 7. ERROR HANDLER
@@ -158,20 +158,22 @@ async def on_voice_state_update(member, before, after):
     if member.bot:
         return
 
+    key = (member.guild.id, member.id)
+
     # Joined a VC
     if before.channel is None and after.channel is not None:
-        vc_join_times[member.id] = time.time()
+        vc_join_times[key] = time.time()
 
     # Left a VC
     elif before.channel is not None and after.channel is None:
-        if member.id in vc_join_times:
-            elapsed = time.time() - vc_join_times.pop(member.id)
-            add_vc_time(member.id, elapsed)
+        if key in vc_join_times:
+            elapsed = time.time() - vc_join_times.pop(key)
+            add_vc_time(member.guild.id, member.id, elapsed)
 
     # Switched channels — keep tracking
     elif before.channel is not None and after.channel is not None:
-        if member.id not in vc_join_times:
-            vc_join_times[member.id] = time.time()
+        if key not in vc_join_times:
+            vc_join_times[key] = time.time()
 
 # ==========================================
 # 9. GAME ACTIVITY TRACKING
@@ -220,7 +222,7 @@ async def help(ctx):
     )
     embed.add_field(
         name="📊 Activity Tracker",
-        value="`!vctime [@user]` - See today's and total VC time\n`!topsession` - VC time leaderboard\n`!lastgame [@user]` - See the last game someone played",
+        value="`!vctime [@user]` - See today's VC time (this server) + all-time total\n`!topsession` - VC time leaderboard for this server\n`!lastgame [@user]` - See the last game someone played",
         inline=False
     )
     embed.add_field(
@@ -434,13 +436,14 @@ async def clear(ctx, amount: int = 5):
 async def vctime(ctx, member: discord.Member = None):
     target = member or ctx.author
     today = get_today()
+    key = (ctx.guild.id, target.id)
 
     total = vc_total_times.get(target.id, 0)
-    today_time = vc_today_times.get(target.id, 0) if vc_today_date.get(target.id) == today else 0
+    today_time = vc_today_times.get(key, 0) if vc_today_date.get(key) == today else 0
 
     # Add live session if currently in VC
-    if target.id in vc_join_times:
-        live = time.time() - vc_join_times[target.id]
+    if key in vc_join_times:
+        live = time.time() - vc_join_times[key]
         total += live
         today_time += live
 
@@ -451,10 +454,10 @@ async def vctime(ctx, member: discord.Member = None):
     embed = discord.Embed(title="🎙️ Voice Channel Time Tracker", color=discord.Color.blurple())
     embed.set_thumbnail(url=target.display_avatar.replace(static_format="png").url)
     embed.add_field(name="Member", value=target.mention, inline=False)
-    embed.add_field(name="📅 Today", value=f"**{format_duration(today_time)}**", inline=True)
+    embed.add_field(name="📅 Today (This Server)", value=f"**{format_duration(today_time)}**", inline=True)
     embed.add_field(name="📊 All Time Total", value=f"**{format_duration(total)}**", inline=True)
-    if target.id in vc_join_times:
-        live = time.time() - vc_join_times[target.id]
+    if key in vc_join_times:
+        live = time.time() - vc_join_times[key]
         embed.add_field(name="🔴 Current Session", value=format_duration(live), inline=False)
     await ctx.send(embed=embed)
 
@@ -462,48 +465,59 @@ async def vctime(ctx, member: discord.Member = None):
 @commands.cooldown(1, 5, commands.BucketType.guild)
 async def topsession(ctx):
     today = get_today()
+    guild_id = ctx.guild.id
 
-    if not vc_total_times and not vc_join_times:
+    # Filter only keys belonging to this guild
+    guild_today = {k: v for k, v in vc_today_times.items() if k[0] == guild_id and vc_today_date.get(k) == today}
+    guild_total_keys = {k for k in vc_join_times if k[0] == guild_id}
+
+    # Build combined today and total for this guild
+    combined_today = dict(guild_today)
+    combined_total = {}
+
+    # Seed total from global vc_total_times for members in this guild
+    for member in ctx.guild.members:
+        if not member.bot and member.id in vc_total_times:
+            combined_total[member.id] = vc_total_times[member.id]
+
+    # Add live sessions
+    for key in guild_total_keys:
+        uid = key[1]
+        live = time.time() - vc_join_times[key]
+        combined_today[key] = combined_today.get(key, 0) + live
+        combined_total[uid] = combined_total.get(uid, 0) + live
+
+    if not combined_total and not combined_today:
         await ctx.send("📭 No VC activity recorded yet since I came online.")
         return
 
-    # Merge stored totals with live sessions
-    combined_total = dict(vc_total_times)
-    combined_today = {}
-
-    for uid in list(vc_today_times.keys()):
-        if vc_today_date.get(uid) == today:
-            combined_today[uid] = vc_today_times[uid]
-
-    for uid, join_time in vc_join_times.items():
-        live = time.time() - join_time
-        combined_total[uid] = combined_total.get(uid, 0) + live
-        combined_today[uid] = combined_today.get(uid, 0) + live
-
     sorted_total = sorted(combined_total.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    embed = discord.Embed(title="🏆 VC Time Leaderboard", color=discord.Color.gold())
     medals = ["🥇", "🥈", "🥉"]
 
     today_board = ""
-    for uid, _ in sorted_total:
-        secs = combined_today.get(uid, 0)
+    sorted_today = sorted(combined_today.items(), key=lambda x: x[1], reverse=True)[:10]
+    for key, secs in sorted_today:
         if secs > 0:
+            uid = key[1]
             member = ctx.guild.get_member(uid)
-            name = member.display_name if member else f"Unknown"
-            today_board += f"{'🔴 ' if uid in vc_join_times else ''}**{name}** — {format_duration(secs)}\n"
+            name = member.display_name if member else "Unknown"
+            live_dot = "🔴 " if (guild_id, uid) in vc_join_times else ""
+            today_board += f"{live_dot}**{name}** — {format_duration(secs)}\n"
 
     total_board = ""
     for i, (uid, secs) in enumerate(sorted_total):
         member = ctx.guild.get_member(uid)
-        name = member.display_name if member else f"Unknown"
+        name = member.display_name if member else "Unknown"
         medal = medals[i] if i < 3 else f"`#{i+1}`"
-        total_board += f"{medal} {'🔴 ' if uid in vc_join_times else ''}**{name}** — {format_duration(secs)}\n"
+        live_dot = "🔴 " if (guild_id, uid) in vc_join_times else ""
+        total_board += f"{medal} {live_dot}**{name}** — {format_duration(secs)}\n"
 
+    embed = discord.Embed(title="🏆 VC Time Leaderboard", color=discord.Color.gold())
     if today_board:
         embed.add_field(name="📅 Today", value=today_board, inline=False)
-    embed.add_field(name="📊 All Time", value=total_board, inline=False)
-    embed.set_footer(text="🔴 = Currently in VC")
+    if total_board:
+        embed.add_field(name="📊 All Time", value=total_board, inline=False)
+    embed.set_footer(text="🔴 = Currently in VC  |  Today resets at midnight UTC")
     await ctx.send(embed=embed)
 
 @bot.command()
