@@ -1,27 +1,21 @@
 # DisBot
 
-  🎉 LOL BOT
+A fun Discord bot with jokes, games, and activity tracking.
 
-A fun Discord bot that brings laughs, games, and activity tracking to your server.
+## Features
+- 🎭 Roasts, slaps, dad jokes, yo mama jokes
+- 🔮 IQ scanner, gay rate, and fun rating commands
+- 🎲 Coin flip & dice games
+- 📊 VC time tracker + leaderboards
+- 🎮 Last played game tracker
+- 👤 Avatar viewer & user info
 
-  ✨ What it does
+## Invite
+[Add DisBot to your server](https://discord.com/oauth2/authorize?client_id=1506548356011266078)
 
-🎭 Roasts, slaps, dad jokes, yo mama burns,
+## 📖 Commands
+Type:
 
-🔮 IQ scanner, gay rate, and more,
+!help
 
-🎲 Coin flip and dice guessing games,
-
-📊 VC time tracker (today + all-time leaderboard),
-
-🎮 Last game played tracker,
-
-👤 Avatar viewer and user info,
-
-  🚀 Add to your server:
-
-[Click here to invite LOL BOT](https://discord.com/oauth2/authorize?client_id=1506548356011266078)
-
-📖 Commands
-
-Type !help in your server to see all available commands.
+to see all commands.
