@@ -1,4 +1,6 @@
+Content is user-generated and unverified.
 import os
+import json
 import random
 import time
 from pathlib import Path
@@ -81,17 +83,45 @@ def format_duration(seconds):
 def add_vc_time(guild_id, user_id, elapsed):
     today = get_today()
     key = (guild_id, user_id)
-
-    # Reset today's counter if it's a new day for this server
     if vc_today_date.get(key) != today:
         vc_today_times[key] = 0
         vc_today_date[key] = today
-
     vc_today_times[key] = vc_today_times.get(key, 0) + elapsed
     vc_total_times[user_id] = vc_total_times.get(user_id, 0) + elapsed
 
 # ==========================================
-# 5. DAILY RESET TASK (midnight UTC)
+# 5. MEDIA TRIGGER SYSTEM
+# ==========================================
+TRIGGERS_FILE = base_dir / "triggers.json"
+
+def load_triggers():
+    """Load triggers from JSON file. Returns dict: {guild_id_str: {word: url}}"""
+    if TRIGGERS_FILE.exists():
+        try:
+            with open(TRIGGERS_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+def save_triggers(data):
+    """Save triggers dict to JSON file."""
+    try:
+        with open(TRIGGERS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except IOError as e:
+        print(f"❌ Failed to save triggers: {e}")
+        return False
+
+# In-memory triggers cache: {guild_id_str: {word: url}}
+media_triggers = load_triggers()
+
+def get_guild_triggers(guild_id):
+    return media_triggers.get(str(guild_id), {})
+
+# ==========================================
+# 6. DAILY RESET TASK (midnight UTC)
 # ==========================================
 @tasks.loop(minutes=1)
 async def daily_reset_check():
@@ -102,7 +132,7 @@ async def daily_reset_check():
             vc_today_date[key] = today
 
 # ==========================================
-# 6. ROTATING STATUS LOOP
+# 7. ROTATING STATUS LOOP
 # ==========================================
 @tasks.loop(seconds=20)
 async def change_status():
@@ -121,7 +151,6 @@ async def on_ready():
     if not daily_reset_check.is_running():
         daily_reset_check.start()
 
-    # Cache anyone already in VC when bot starts
     for guild in bot.guilds:
         for vc in guild.voice_channels:
             for member in vc.members:
@@ -129,7 +158,7 @@ async def on_ready():
                     vc_join_times[(guild.id, member.id)] = time.time()
 
 # ==========================================
-# 7. ERROR HANDLER
+# 8. ERROR HANDLER
 # ==========================================
 @bot.event
 async def on_command_error(ctx, error):
@@ -139,6 +168,9 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ Missing inputs! Look closely at `!help` for correct command usage.")
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("🔒 You do not possess the required moderation permissions to use this feature.")
+    elif isinstance(error, commands.CommandNotFound):
+        # Check if it's a media trigger before saying "unknown command"
+        pass
     else:
         print(f"Ignored runtime exception tracker logs: {error}")
 
@@ -148,55 +180,53 @@ async def on_message(message):
         return
     if 'hi' in message.content.lower() or 'hello' in message.content.lower():
         await message.channel.send(f'Hey there, {message.author.mention}! 👋')
+
+    # ── Media Trigger Check ──────────────────────────────────────
+    # Fires BEFORE process_commands so triggers don't conflict with real commands
+    if message.content.startswith('!') and message.guild:
+        word = message.content[1:].strip().lower().split()[0]  # e.g. "!laugh" → "laugh"
+        guild_triggers = get_guild_triggers(message.guild.id)
+        if word in guild_triggers:
+            await message.channel.send(guild_triggers[word])
+            return  # Don't pass to command processor — it's a trigger, not a command
+
     await bot.process_commands(message)
 
 # ==========================================
-# 8. VC TRACKING EVENTS
+# 9. VC TRACKING EVENTS
 # ==========================================
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
-
     key = (member.guild.id, member.id)
-
-    # Joined a VC
     if before.channel is None and after.channel is not None:
         vc_join_times[key] = time.time()
-
-    # Left a VC
     elif before.channel is not None and after.channel is None:
         if key in vc_join_times:
             elapsed = time.time() - vc_join_times.pop(key)
             add_vc_time(member.guild.id, member.id, elapsed)
-
-    # Switched channels — keep tracking
     elif before.channel is not None and after.channel is not None:
         if key not in vc_join_times:
             vc_join_times[key] = time.time()
 
 # ==========================================
-# 9. GAME ACTIVITY TRACKING
+# 10. GAME ACTIVITY TRACKING
 # ==========================================
 @bot.event
 async def on_presence_update(before, after):
     if after.bot:
         return
-
     before_game = next((a for a in before.activities if isinstance(a, discord.Game)), None)
     after_game = next((a for a in after.activities if isinstance(a, discord.Game)), None)
-
     if after_game and after_game != before_game:
-        last_game[after.id] = {
-            "name": after_game.name,
-            "time": time.time()
-        }
+        last_game[after.id] = {"name": after_game.name, "time": time.time()}
     elif before_game and not after_game:
         if after.id in last_game:
             last_game[after.id]["ended"] = time.time()
 
 # ==========================================
-# 10. CUSTOM HELP COMMAND
+# 11. CUSTOM HELP COMMAND
 # ==========================================
 @bot.command()
 async def help(ctx):
@@ -226,6 +256,16 @@ async def help(ctx):
         inline=False
     )
     embed.add_field(
+        name="🎬 Media Triggers",
+        value=(
+            "`!addtrigger <word> <url>` - Save a URL to a trigger word (Staff only)\n"
+            "`!removetrigger <word>` - Delete a trigger (Staff only)\n"
+            "`!triggers` - List all saved triggers\n"
+            "`!<word>` - Fire any saved trigger"
+        ),
+        inline=False
+    )
+    embed.add_field(
         name="👤 Profile & Utilities",
         value="`!avatar [@user]` - View high-res avatar\n`!userinfo [@user]` - Displays account details\n`!clear [number]` - Purges chat messages (Staff Only)",
         inline=False
@@ -234,7 +274,140 @@ async def help(ctx):
     await ctx.send(embed=embed)
 
 # ==========================================
-# 11. FUN COMMANDS
+# 12. MEDIA TRIGGER MANAGEMENT COMMANDS
+# ==========================================
+
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+@commands.cooldown(1, 2, commands.BucketType.user)
+async def addtrigger(ctx, word: str, url: str):
+    """
+    Save a media trigger for this server.
+    Usage: !addtrigger laugh https://cdn.discordapp.com/attachments/.../laugh.mp4
+    The word is case-insensitive. URL can be a direct image/video/GIF link.
+    Staff only (Manage Messages permission required).
+    """
+    word = word.lower().strip()
+
+    # Block overwriting built-in commands
+    built_in = {
+        "help", "roast", "slap", "dadjoke", "yomama", "iqtest", "coinflip",
+        "dice", "whoisgay", "gayrate", "avatar", "userinfo", "clear",
+        "vctime", "topsession", "lastgame", "addtrigger", "removetrigger", "triggers"
+    }
+    if word in built_in:
+        await ctx.send(f"❌ `{word}` is a reserved bot command and cannot be used as a trigger.")
+        return
+
+    # Validate URL is a direct media link
+    valid_extensions = (
+        ".gif", ".png", ".jpg", ".jpeg", ".webp",   # images
+        ".mp4", ".mov", ".webm", ".mkv",             # videos
+    )
+    url_lower = url.lower().split("?")[0]  # strip query params before checking extension
+    is_discord_cdn = "cdn.discordapp.com" in url or "media.discordapp.net" in url
+    is_tenor = "tenor.com" in url
+    is_giphy = "giphy.com" in url
+    has_valid_ext = any(url_lower.endswith(ext) for ext in valid_extensions)
+
+    if not (has_valid_ext or is_discord_cdn or is_tenor or is_giphy):
+        await ctx.send(
+            "⚠️ That URL doesn't look like a direct media link.\n"
+            "Use a direct link ending in `.gif`, `.mp4`, `.png`, `.jpg`, etc., "
+            "or a Discord CDN / Tenor / Giphy link.\n\n"
+            "**Tip:** Upload your file to Discord, right-click → **Copy Link** to get the direct URL."
+        )
+        return
+
+    guild_id = str(ctx.guild.id)
+    if guild_id not in media_triggers:
+        media_triggers[guild_id] = {}
+
+    is_update = word in media_triggers[guild_id]
+    media_triggers[guild_id][word] = url
+
+    if save_triggers(media_triggers):
+        action = "updated" if is_update else "saved"
+        embed = discord.Embed(
+            title="✅ Media Trigger Saved",
+            description=f"Trigger word `!{word}` has been {action}.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Word", value=f"`!{word}`", inline=True)
+        embed.add_field(name="Added by", value=ctx.author.mention, inline=True)
+        embed.add_field(name="URL", value=url[:80] + ("..." if len(url) > 80 else ""), inline=False)
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("❌ Failed to save trigger to disk. Check bot file permissions.")
+
+
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+@commands.cooldown(1, 2, commands.BucketType.user)
+async def removetrigger(ctx, word: str):
+    """
+    Remove a saved media trigger for this server.
+    Usage: !removetrigger laugh
+    Staff only (Manage Messages permission required).
+    """
+    word = word.lower().strip()
+    guild_id = str(ctx.guild.id)
+
+    if guild_id not in media_triggers or word not in media_triggers[guild_id]:
+        await ctx.send(f"❌ No trigger found for `!{word}` in this server.")
+        return
+
+    del media_triggers[guild_id][word]
+    if not media_triggers[guild_id]:
+        del media_triggers[guild_id]
+
+    if save_triggers(media_triggers):
+        await ctx.send(f"🗑️ Trigger `!{word}` has been removed successfully.")
+    else:
+        await ctx.send("❌ Removed from memory but failed to save to disk. Restart may restore it.")
+
+
+@bot.command()
+@commands.cooldown(1, 3, commands.BucketType.channel)
+async def triggers(ctx):
+    """
+    List all media triggers saved for this server.
+    Usage: !triggers
+    """
+    guild_triggers = get_guild_triggers(ctx.guild.id)
+
+    if not guild_triggers:
+        await ctx.send("📭 No media triggers saved for this server yet.\nStaff can add one with `!addtrigger <word> <url>`.")
+        return
+
+    # Paginate if there are lots of triggers (Discord field limit = 1024 chars)
+    trigger_lines = [f"`!{word}`" for word in sorted(guild_triggers.keys())]
+    chunks = []
+    current = []
+    current_len = 0
+    for line in trigger_lines:
+        if current_len + len(line) + 2 > 900:
+            chunks.append("  ".join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += len(line) + 2
+    if current:
+        chunks.append("  ".join(current))
+
+    embed = discord.Embed(
+        title=f"🎬 Media Triggers — {ctx.guild.name}",
+        description=f"**{len(guild_triggers)}** trigger(s) saved. Type any to fire it!",
+        color=discord.Color.blurple()
+    )
+    for i, chunk in enumerate(chunks):
+        embed.add_field(name=f"Triggers{' (cont.)' if i > 0 else ''}", value=chunk, inline=False)
+    embed.set_footer(text="Staff: use !addtrigger <word> <url> to add • !removetrigger <word> to delete")
+    await ctx.send(embed=embed)
+
+# ==========================================
+# 13. FUN COMMANDS
 # ==========================================
 
 @bot.command()
@@ -340,7 +513,7 @@ async def yomama(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 # ==========================================
-# 12. SCANNER COMMANDS
+# 14. SCANNER COMMANDS
 # ==========================================
 
 @bot.command()
@@ -428,7 +601,7 @@ async def clear(ctx, amount: int = 5):
     await ctx.send(f'🧹 Cleared {amount} messages!', delete_after=3)
 
 # ==========================================
-# 13. ACTIVITY TRACKER COMMANDS
+# 15. ACTIVITY TRACKER COMMANDS
 # ==========================================
 
 @bot.command()
@@ -441,7 +614,6 @@ async def vctime(ctx, member: discord.Member = None):
     total = vc_total_times.get(target.id, 0)
     today_time = vc_today_times.get(key, 0) if vc_today_date.get(key) == today else 0
 
-    # Add live session if currently in VC
     if key in vc_join_times:
         live = time.time() - vc_join_times[key]
         total += live
@@ -453,102 +625,66 @@ async def vctime(ctx, member: discord.Member = None):
 
     embed = discord.Embed(title="🎙️ Voice Channel Time Tracker", color=discord.Color.blurple())
     embed.set_thumbnail(url=target.display_avatar.replace(static_format="png").url)
-    embed.add_field(name="Member", value=target.mention, inline=False)
-    embed.add_field(name="📅 Today (This Server)", value=f"**{format_duration(today_time)}**", inline=True)
-    embed.add_field(name="📊 All Time Total", value=f"**{format_duration(total)}**", inline=True)
-    if key in vc_join_times:
-        live = time.time() - vc_join_times[key]
-        embed.add_field(name="🔴 Current Session", value=format_duration(live), inline=False)
+    embed.add_field(name="Member", value=target.mention, inline=True)
+    embed.add_field(name="Today (This Server)", value=format_duration(today_time), inline=True)
+    embed.add_field(name="All-Time Total (Global)", value=format_duration(total), inline=True)
     await ctx.send(embed=embed)
 
 @bot.command()
-@commands.cooldown(1, 5, commands.BucketType.guild)
+@commands.cooldown(1, 5, commands.BucketType.channel)
 async def topsession(ctx):
     today = get_today()
-    guild_id = ctx.guild.id
+    guild_data = []
 
-    # Filter only keys belonging to this guild
-    guild_today = {k: v for k, v in vc_today_times.items() if k[0] == guild_id and vc_today_date.get(k) == today}
-    guild_total_keys = {k for k in vc_join_times if k[0] == guild_id}
-
-    # Build combined today and total for this guild
-    combined_today = dict(guild_today)
-    combined_total = {}
-
-    # Seed total from global vc_total_times for members in this guild
     for member in ctx.guild.members:
-        if not member.bot and member.id in vc_total_times:
-            combined_total[member.id] = vc_total_times[member.id]
+        if member.bot:
+            continue
+        key = (ctx.guild.id, member.id)
+        today_time = vc_today_times.get(key, 0) if vc_today_date.get(key) == today else 0
+        if key in vc_join_times:
+            today_time += time.time() - vc_join_times[key]
+        if today_time > 0:
+            guild_data.append((member, today_time))
 
-    # Add live sessions
-    for key in guild_total_keys:
-        uid = key[1]
-        live = time.time() - vc_join_times[key]
-        combined_today[key] = combined_today.get(key, 0) + live
-        combined_total[uid] = combined_total.get(uid, 0) + live
+    guild_data.sort(key=lambda x: x[1], reverse=True)
 
-    if not combined_total and not combined_today:
-        await ctx.send("📭 No VC activity recorded yet since I came online.")
+    if not guild_data:
+        await ctx.send("📭 No VC activity recorded for today in this server yet.")
         return
 
-    sorted_total = sorted(combined_total.items(), key=lambda x: x[1], reverse=True)[:10]
+    embed = discord.Embed(title=f"🏆 Today's VC Leaderboard — {ctx.guild.name}", color=discord.Color.gold())
     medals = ["🥇", "🥈", "🥉"]
-
-    today_board = ""
-    sorted_today = sorted(combined_today.items(), key=lambda x: x[1], reverse=True)[:10]
-    for key, secs in sorted_today:
-        if secs > 0:
-            uid = key[1]
-            member = ctx.guild.get_member(uid)
-            name = member.display_name if member else "Unknown"
-            live_dot = "🔴 " if (guild_id, uid) in vc_join_times else ""
-            today_board += f"{live_dot}**{name}** — {format_duration(secs)}\n"
-
-    total_board = ""
-    for i, (uid, secs) in enumerate(sorted_total):
-        member = ctx.guild.get_member(uid)
-        name = member.display_name if member else "Unknown"
-        medal = medals[i] if i < 3 else f"`#{i+1}`"
-        live_dot = "🔴 " if (guild_id, uid) in vc_join_times else ""
-        total_board += f"{medal} {live_dot}**{name}** — {format_duration(secs)}\n"
-
-    embed = discord.Embed(title="🏆 VC Time Leaderboard", color=discord.Color.gold())
-    if today_board:
-        embed.add_field(name="📅 Today", value=today_board, inline=False)
-    if total_board:
-        embed.add_field(name="📊 All Time", value=total_board, inline=False)
-    embed.set_footer(text="🔴 = Currently in VC  |  Today resets at midnight UTC")
+    for i, (member, seconds) in enumerate(guild_data[:10]):
+        prefix = medals[i] if i < 3 else f"`#{i+1}`"
+        embed.add_field(name=f"{prefix} {member.display_name}", value=format_duration(seconds), inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 @commands.cooldown(1, 2, commands.BucketType.user)
 async def lastgame(ctx, member: discord.Member = None):
     target = member or ctx.author
-
-    # Check live activity first
-    current_game = next((a for a in target.activities if isinstance(a, discord.Game)), None)
-    if current_game:
-        embed = discord.Embed(title="🎮 Game Activity", color=discord.Color.green())
-        embed.set_thumbnail(url=target.display_avatar.replace(static_format="png").url)
-        embed.add_field(name="Member", value=target.mention, inline=False)
-        embed.add_field(name="🟢 Currently Playing", value=f"**{current_game.name}**", inline=False)
-        await ctx.send(embed=embed)
-        return
-
     data = last_game.get(target.id)
+
     if not data:
         await ctx.send(f"🎮 No game activity recorded for {target.mention} since I came online.")
         return
 
-    ended = data.get("ended")
-    time_str = f"<t:{int(ended)}:R>" if ended else f"<t:{int(data['time'])}:R>"
-    status = "Last Seen Playing" if ended else "Was Playing"
-
-    embed = discord.Embed(title="🎮 Game Activity", color=discord.Color.purple())
+    started = datetime.utcfromtimestamp(data["time"]).strftime("%b %d, %Y at %H:%M UTC")
+    embed = discord.Embed(title="🎮 Last Recorded Game Activity", color=discord.Color.dark_green())
     embed.set_thumbnail(url=target.display_avatar.replace(static_format="png").url)
-    embed.add_field(name="Member", value=target.mention, inline=False)
-    embed.add_field(name=status, value=f"**{data['name']}**", inline=True)
-    embed.add_field(name="Last Seen", value=time_str, inline=True)
+    embed.add_field(name="Player", value=target.mention, inline=True)
+    embed.add_field(name="Game", value=data["name"], inline=True)
+    embed.add_field(name="Session Started", value=started, inline=False)
+    if "ended" in data:
+        ended = datetime.utcfromtimestamp(data["ended"]).strftime("%b %d, %Y at %H:%M UTC")
+        duration = format_duration(data["ended"] - data["time"])
+        embed.add_field(name="Session Ended", value=ended, inline=True)
+        embed.add_field(name="Duration", value=duration, inline=True)
+    else:
+        embed.add_field(name="Status", value="🟢 Currently Playing", inline=False)
     await ctx.send(embed=embed)
 
+# ==========================================
+# 16. RUN BOT
+# ==========================================
 bot.run(TOKEN)
